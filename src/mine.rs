@@ -23,7 +23,7 @@ use crate::{
 
 impl Miner {
     pub async fn mine(&self, args: MineArgs) {
-        // Register, if needed.
+        // Register if needed
         let signer = self.signer();
         self.open().await;
 
@@ -42,21 +42,32 @@ impl Miner {
             );
 
             // Calc cutoff time
-            let cutoff_time = self.get_cutoff(proof, args.buffer_time).await;
+            let cutoff_time = self.get_cutoff(proof.clone(), args.buffer_time).await;
 
             // Run drillx
-            let solution = Self::find_hash_par(
-                proof,
+            let (solution, best_difficulty) = Self::find_hash_par(
+                proof.clone(),
                 cutoff_time,
                 args.threads,
                 config.min_difficulty as u32,
             )
             .await;
 
+            // Log the difficulty for debugging
+            println!("Best difficulty found: {}", best_difficulty);
+
+            // Check if difficulty is less than 20
+            if best_difficulty < 20 {
+                println!("Difficulty is less than 20. Mining again...");
+                continue; // Skip to next iteration of the mining loop
+            }
+
             // Submit most difficult hash
             let mut compute_budget = 500_000;
-            let mut ixs = vec![ore_api::instruction::auth(proof_pubkey(signer.pubkey()))];
-            if self.should_reset(config).await && rand::thread_rng().gen_range(0..100).eq(&0) {
+            let mut ixs = vec![
+                ore_api::instruction::auth(proof_pubkey(signer.pubkey()))
+            ];
+            if self.should_reset(config.clone()).await && rand::thread_rng().gen_range(0..100).eq(&0) {
                 compute_budget += 100_000;
                 ixs.push(ore_api::instruction::reset(signer.pubkey()));
             }
@@ -66,6 +77,9 @@ impl Miner {
                 find_bus(),
                 solution,
             ));
+
+            // Log the submission details for debugging
+            println!("Submitting solution...");
             self.send_and_confirm(&ixs, ComputeBudget::Fixed(compute_budget), false)
                 .await
                 .ok();
@@ -77,7 +91,7 @@ impl Miner {
         cutoff_time: u64,
         threads: u64,
         min_difficulty: u32,
-    ) -> Solution {
+    ) -> (Solution, u32) {
         // Dispatch job to each thread
         let progress_bar = Arc::new(spinner::new_progress_bar());
         progress_bar.set_message("Mining...");
@@ -101,7 +115,7 @@ impl Miner {
                                 &nonce.to_le_bytes(),
                             ) {
                                 let difficulty = hx.difficulty();
-                                if difficulty.gt(&best_difficulty) {
+                                if difficulty > best_difficulty {
                                     best_nonce = nonce;
                                     best_difficulty = difficulty;
                                     best_hash = hx;
@@ -127,7 +141,7 @@ impl Miner {
                             nonce += 1;
                         }
 
-                        // Return the best nonce
+                        // Return the best nonce and difficulty
                         (best_nonce, best_difficulty, best_hash)
                     }
                 })
@@ -155,13 +169,13 @@ impl Miner {
             best_difficulty
         ));
 
-        Solution::new(best_hash.d, best_nonce.to_le_bytes())
+        (Solution::new(best_hash.d, best_nonce.to_le_bytes()), best_difficulty)
     }
 
     pub fn check_num_cores(&self, threads: u64) {
         // Check num threads
         let num_cores = num_cpus::get() as u64;
-        if threads.gt(&num_cores) {
+        if threads > num_cores {
             println!(
                 "{} Number of threads ({}) exceeds available cores ({})",
                 "WARNING".bold().yellow(),
